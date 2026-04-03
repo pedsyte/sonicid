@@ -22,26 +22,10 @@ MAX_FILE_SIZE = 100 * 1024 * 1024  # 100 MB
 KEEP_SECONDS = 1800  # 30 min
 AUDIO_EXTS = {".mp3", ".wav", ".flac", ".ogg", ".aac", ".m4a", ".opus", ".wma", ".aiff"}
 
-# ── Genre grouping: sub-genre → top genre ──────────────────────────
-GENRE_LABELS: list[str] = []
-TOP_GENRES_MAP: dict[str, str] = {}
-
-
-def _load_genre_labels():
-    global GENRE_LABELS, TOP_GENRES_MAP
-    meta_path = MODELS_DIR / "genre_discogs400.json"
-    if meta_path.exists():
-        data = json.loads(meta_path.read_text())
-        GENRE_LABELS = data.get("classes", [])
-        for label in GENRE_LABELS:
-            if "---" in label:
-                top, sub = label.split("---", 1)
-                TOP_GENRES_MAP[label] = top.strip()
-            else:
-                TOP_GENRES_MAP[label] = label.strip()
-
-
-_load_genre_labels()
+# ── Genre labels ───────────────────────────────────────────────────
+GENRE_DORTMUND_LABELS = ['Alternative', 'Blues', 'Electronic', 'Folk/Country', 'Funk/Soul/R&B', 'Jazz', 'Pop', 'Rap/Hip-Hop', 'Rock']
+GENRE_ELECTRONIC_LABELS = ['Ambient', 'Drum & Bass', 'House', 'Techno', 'Trance']
+GENRE_ROSAMERICA_LABELS = ['Classical', 'Dance', 'Hip-Hop', 'Jazz', 'Pop', 'R&B', 'Rock', 'Speech']
 
 # ── Lazy model loading ─────────────────────────────────────────────
 _models_cache: dict[str, object] = {}
@@ -85,52 +69,61 @@ def _extract_embeddings(audio: np.ndarray) -> np.ndarray:
     return embeddings
 
 
-def _classify_genre(embeddings: np.ndarray) -> list[dict]:
-    model = _get_model("genre_discogs400")
-    if model is None:
-        return []
-    predictions = model(embeddings)
-    avg = np.mean(predictions, axis=0)
-
-    # Top-level genre aggregation
-    top_genre_scores: dict[str, float] = {}
-    for i, score in enumerate(avg):
-        if i < len(GENRE_LABELS):
-            label = GENRE_LABELS[i]
-            top = TOP_GENRES_MAP.get(label, label)
-            top_genre_scores[top] = top_genre_scores.get(top, 0.0) + float(score)
-
-    # Sort by score
-    sorted_genres = sorted(top_genre_scores.items(), key=lambda x: x[1], reverse=True)
-
-    # Top sub-genres
-    sub_indices = np.argsort(avg)[::-1][:10]
+def _classify_genre(embeddings: np.ndarray) -> tuple:
+    genres = []
     sub_genres = []
-    for idx in sub_indices:
-        if idx < len(GENRE_LABELS):
-            label = GENRE_LABELS[idx]
-            sub = label.split("---", 1)[1].strip() if "---" in label else label
-            top = TOP_GENRES_MAP.get(label, "Unknown")
-            sub_genres.append({
-                "genre": top,
-                "subgenre": sub,
-                "score": round(float(avg[idx]) * 100, 1),
-            })
 
-    result = []
-    for genre, score in sorted_genres[:8]:
-        result.append({"genre": genre, "score": round(score * 100, 1)})
-    return result, sub_genres
+    # Main genre detection (Dortmund — 9 genres)
+    model = _get_model("genre_dortmund")
+    if model is not None:
+        predictions = model(embeddings)
+        avg = np.mean(predictions, axis=0)
+        for i in np.argsort(avg)[::-1]:
+            if i < len(GENRE_DORTMUND_LABELS):
+                genres.append({
+                    "genre": GENRE_DORTMUND_LABELS[i],
+                    "score": round(float(avg[i]) * 100, 1),
+                })
+
+    # Rosamerica (8 genres) — as sub-genres / second opinion
+    model2 = _get_model("genre_rosamerica")
+    if model2 is not None:
+        predictions2 = model2(embeddings)
+        avg2 = np.mean(predictions2, axis=0)
+        for i in np.argsort(avg2)[::-1][:5]:
+            if i < len(GENRE_ROSAMERICA_LABELS):
+                sub_genres.append({
+                    "genre": GENRE_ROSAMERICA_LABELS[i],
+                    "subgenre": GENRE_ROSAMERICA_LABELS[i],
+                    "score": round(float(avg2[i]) * 100, 1),
+                })
+
+    # Electronic sub-genres (if electronic is top)
+    is_electronic = genres and genres[0]["genre"] == "Electronic" and genres[0]["score"] > 20
+    model3 = _get_model("genre_electronic")
+    if model3 is not None and is_electronic:
+        predictions3 = model3(embeddings)
+        avg3 = np.mean(predictions3, axis=0)
+        electronic_subs = []
+        for i in np.argsort(avg3)[::-1]:
+            if i < len(GENRE_ELECTRONIC_LABELS):
+                electronic_subs.append({
+                    "genre": "Electronic",
+                    "subgenre": GENRE_ELECTRONIC_LABELS[i],
+                    "score": round(float(avg3[i]) * 100, 1),
+                })
+        sub_genres = electronic_subs + sub_genres
+
+    return genres, sub_genres
 
 
-def _classify_binary(embeddings: np.ndarray, model_name: str) -> float:
+def _classify_binary(embeddings: np.ndarray, model_name: str, positive_index: int = 0) -> float:
     model = _get_model(model_name)
     if model is None:
         return 0.0
     predictions = model(embeddings)
     avg = np.mean(predictions, axis=0)
-    # Index 0 is typically the positive class
-    return float(avg[0]) if len(avg) > 0 else 0.0
+    return float(avg[positive_index]) if len(avg) > positive_index else 0.0
 
 
 def _detect_bpm_key(audio_44k: np.ndarray) -> dict:
@@ -203,30 +196,32 @@ def _analyze_full(filepath: Path) -> dict:
     genres, sub_genres = _classify_genre(embeddings)
 
     # Mood / characteristics (binary classifiers)
+    # Classes: happy=[happy,non_happy], sad=[non_sad,sad], aggressive=[aggressive,not],
+    #          relaxed=[non_relaxed,relaxed], electronic=[electronic,non], acoustic=[acoustic,non]
     moods = {
-        "happy": round(_classify_binary(embeddings, "mood_happy") * 100, 1),
-        "sad": round(_classify_binary(embeddings, "mood_sad") * 100, 1),
-        "aggressive": round(_classify_binary(embeddings, "mood_aggressive") * 100, 1),
-        "relaxed": round(_classify_binary(embeddings, "mood_relaxed") * 100, 1),
-        "electronic": round(_classify_binary(embeddings, "mood_electronic") * 100, 1),
-        "acoustic": round(_classify_binary(embeddings, "mood_acoustic") * 100, 1),
+        "happy": round(_classify_binary(embeddings, "mood_happy", 0) * 100, 1),
+        "sad": round(_classify_binary(embeddings, "mood_sad", 1) * 100, 1),
+        "aggressive": round(_classify_binary(embeddings, "mood_aggressive", 0) * 100, 1),
+        "relaxed": round(_classify_binary(embeddings, "mood_relaxed", 1) * 100, 1),
+        "electronic": round(_classify_binary(embeddings, "mood_electronic", 0) * 100, 1),
+        "acoustic": round(_classify_binary(embeddings, "mood_acoustic", 0) * 100, 1),
     }
 
-    # Danceability
-    danceability = round(_classify_binary(embeddings, "danceability") * 100, 1)
+    # Danceability: [danceable, not_danceable]
+    danceability = round(_classify_binary(embeddings, "danceability", 0) * 100, 1)
 
-    # Voice / instrumental
-    voice_score = _classify_binary(embeddings, "voice_instrumental")
+    # Voice / instrumental: [instrumental, voice] — index 1 = voice
+    voice_score = _classify_binary(embeddings, "voice_instrumental", 1)
     is_vocal = voice_score > 0.5
     vocal_confidence = round(abs(voice_score - 0.5) * 200, 1)
 
-    # Gender (if vocal)
-    gender_score = _classify_binary(embeddings, "gender") if is_vocal else 0.5
+    # Gender: [female, male] — index 0 = female
+    gender_score = _classify_binary(embeddings, "gender", 0) if is_vocal else 0.5
     gender = "female" if gender_score > 0.5 else "male"
     gender_confidence = round(abs(gender_score - 0.5) * 200, 1)
 
-    # Tonal / atonal
-    tonal_score = _classify_binary(embeddings, "tonal_atonal")
+    # Tonal / atonal: [atonal, tonal] — index 1 = tonal
+    tonal_score = _classify_binary(embeddings, "tonal_atonal", 1)
     is_tonal = tonal_score > 0.5
 
     # BPM, Key, Energy
@@ -234,6 +229,44 @@ def _analyze_full(filepath: Path) -> dict:
 
     # Duration
     duration = _get_duration(filepath)
+
+    # Build Suno-style prompt
+    prompt_parts = []
+    # Top genres
+    for g in genres[:3]:
+        if g["score"] > 10:
+            prompt_parts.append(g["genre"])
+    # Sub-genres
+    for sg in sub_genres[:3]:
+        if sg["score"] > 15 and sg["subgenre"] not in prompt_parts:
+            prompt_parts.append(sg["subgenre"])
+    # Dominant moods (>50%)
+    mood_names = {"happy": "Happy", "sad": "Sad", "aggressive": "Aggressive",
+                  "relaxed": "Relaxed", "electronic": "Electronic", "acoustic": "Acoustic"}
+    for mk, mv in sorted(moods.items(), key=lambda x: x[1], reverse=True):
+        if mv > 50:
+            prompt_parts.append(mood_names.get(mk, mk))
+    # BPM
+    prompt_parts.append(f"{rhythm_data['bpm']} BPM")
+    # Key
+    if rhythm_data["key"]:
+        scale_str = "minor" if rhythm_data["scale"] == "minor" else "major"
+        prompt_parts.append(f"{rhythm_data['key']} {scale_str}")
+    # Vocal/Instrumental
+    if is_vocal:
+        prompt_parts.append(f"{gender} vocals")
+    else:
+        prompt_parts.append("instrumental")
+    # Danceability
+    if danceability > 60:
+        prompt_parts.append("danceable")
+    # Energy level
+    if moods.get("aggressive", 0) > 50:
+        prompt_parts.append("high energy")
+    elif moods.get("relaxed", 0) > 50:
+        prompt_parts.append("chill")
+
+    suno_prompt = ", ".join(prompt_parts)
 
     return {
         "genres": genres,
@@ -249,6 +282,7 @@ def _analyze_full(filepath: Path) -> dict:
         "tonal": is_tonal,
         "rhythm": rhythm_data,
         "duration": duration,
+        "suno_prompt": suno_prompt,
     }
 
 

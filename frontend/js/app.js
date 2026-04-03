@@ -103,6 +103,7 @@
     renderMoods(data.moods);
     renderRhythm(data.rhythm, data.duration);
     renderCharacteristics(data);
+    renderSunoPrompt(data.suno_prompt);
   }
 
   function renderGenres(genres, subGenres) {
@@ -238,6 +239,19 @@
         </div>
       </div>
     `).join("");
+  }
+
+  function renderSunoPrompt(prompt) {
+    const el = $("#sunoPrompt");
+    const btn = $("#sunoCopy");
+    const msg = $("#sunoCopied");
+    el.textContent = prompt || "";
+    btn.onclick = () => {
+      navigator.clipboard.writeText(prompt || "").then(() => {
+        msg.classList.remove("hidden");
+        setTimeout(() => msg.classList.add("hidden"), 2000);
+      });
+    };
   }
 
   function humanSize(bytes) {

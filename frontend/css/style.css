@@ -103,6 +103,25 @@ a:hover{text-decoration:underline}
 }
 .btn-reset:hover{border-color:var(--accent);background:rgba(124,92,252,.08)}
 
+/* Suno Prompt */
+.suno-hint{color:var(--text2);font-size:.85rem;margin-bottom:12px}
+.suno-prompt-wrap{position:relative}
+.suno-prompt{
+  background:var(--surface);border:1px solid var(--border);border-radius:var(--radius-sm);
+  padding:16px 48px 16px 16px;font-family:'Segoe UI',system-ui,sans-serif;font-size:.95rem;
+  color:var(--accent2);line-height:1.6;white-space:pre-wrap;word-break:break-word;
+  min-height:48px;
+}
+.suno-copy{
+  position:absolute;top:8px;right:8px;background:none;border:1px solid var(--border);
+  border-radius:8px;padding:6px 10px;font-size:1.1rem;cursor:pointer;
+  color:var(--text2);transition:all .2s;
+}
+.suno-copy:hover{border-color:var(--accent);color:var(--accent)}
+.suno-copied{
+  text-align:center;color:var(--green);font-size:.85rem;margin-top:8px;
+}
+
 /* Footer */
 .footer{text-align:center;padding:24px 0;color:var(--text2);font-size:.8rem}
 
